@@ -1,0 +1,5 @@
+# apex is required for mixed-precision and DDP(DistributedDataParallel)
+apex==0.1
+tqdm
+scipy
+torch>=1.1.0
