@@ -6,6 +6,7 @@ import os
 import random
 import sys
 
+import time
 import numpy as np
 import torch
 from torch.utils.data import (DataLoader, RandomSampler, TensorDataset)
@@ -15,7 +16,7 @@ from tqdm import tqdm, trange
 from models.modeling_bert import QuestionAnswering, Config
 from utils.optimization import AdamW, WarmupLinearSchedule
 from utils.tokenization import BertTokenizer
-from utils.korquad_utils import read_squad_examples, convert_examples_to_features
+from utils.korquad_utils import read_squad_examples, convert_examples_to_features, KorQuADDataset
 
 if sys.version_info[0] == 2:
     import cPickle as pickle
@@ -41,7 +42,7 @@ def train(args, train_dataset, model):
     """ Train the model """
     args.train_batch_size = args.per_gpu_train_batch_size // args.gradient_accumulation_steps
     train_sampler = RandomSampler(train_dataset) if args.local_rank == -1 else DistributedSampler(train_dataset)
-    train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size)
+    train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size,num_workers=args.num_workers)
 
     t_total = len(train_dataloader) // args.gradient_accumulation_steps * args.num_train_epochs
 
@@ -141,6 +142,9 @@ def train(args, train_dataset, model):
                                                                     epochs,
                                                                     int(args.num_train_epochs))
             logger.info(model_checkpoint)
+
+            if not os.path.exists(args.output_dir):
+                os.makedirs(args.output_dir)
             output_model_file = os.path.join(args.output_dir, model_checkpoint)
             if args.n_gpu > 1 or args.local_rank != -1:
                 logger.info("** ** * Saving file * ** ** (module)")
@@ -151,6 +155,18 @@ def train(args, train_dataset, model):
         epochs += 1
     logger.info("Training End!!!")
 
+def get_data_index_dict(args,tokenizer):
+    logger.info("Read training data and get data_index_dict - {data_id : {example_index: xx, doc_index:xx}}")
+    examples = read_squad_examples(input_file=args.train_file, is_training=True, version_2_with_negative=False)
+    data_index_dict = convert_examples_to_features(examples=examples,
+                                                   tokenizer=tokenizer,
+                                                   max_seq_length=args.max_seq_length,
+                                                   doc_stride=args.doc_stride,
+                                                   max_query_length=args.max_query_length,
+                                                   is_training=True,
+                                                   only_get_dict=True)
+
+    return examples, data_index_dict
 
 def load_and_cache_examples(args, tokenizer):
     # Load data features from cache or dataset file
@@ -158,12 +174,15 @@ def load_and_cache_examples(args, tokenizer):
     cached_features_file = os.path.join(os.path.dirname(input_file), '_cached_{}_{}_{}'.format('train',
                                                                                                str(args.max_seq_length),
                                                                                                args.doc_stride))
+
+
     if os.path.exists(cached_features_file):
         logger.info("Loading features from cached file %s", cached_features_file)
         features = torch.load(cached_features_file)
     else:
         logger.info("Creating features from dataset file at %s", input_file)
         examples = read_squad_examples(input_file=args.train_file, is_training=True, version_2_with_negative=False)
+
         features = convert_examples_to_features(examples=examples,
                                                 tokenizer=tokenizer,
                                                 max_seq_length=args.max_seq_length,
@@ -188,6 +207,8 @@ def load_and_cache_examples(args, tokenizer):
 def main():
     parser = argparse.ArgumentParser()
     # Parameters
+    parser.add_argument("--dynamic_training",action="store_true",help="Input feature will be made during training (input feature pkl file will not be used")
+    parser.add_argument("--num_workers",type=int, help="The number of workers for data loading",default=0)
     parser.add_argument("--output_dir", default='output', type=str,
                         help="The output directory where the model checkpoints and predictions will be written.")
     parser.add_argument("--checkpoint", default='pretrain_ckpt/large_v1_model.bin', type=str,
@@ -284,8 +305,15 @@ def main():
     logger.info("Training hyper-parameters %s", args)
 
     # Training
-    train_dataset = load_and_cache_examples(args, tokenizer)
+    if args.dynamic_training == True:
+        examples, data_index_dict = get_data_index_dict(args,tokenizer)
+        train_dataset = KorQuADDataset(examples,data_index_dict,tokenizer,args)
+    else:
+        train_dataset = load_and_cache_examples(args, tokenizer)
+
+    start = time.time()
     train(args, train_dataset, model)
+    logger.info("elapsed time = %.2f",time.time()-start)
 
 
 if __name__ == "__main__":
