@@ -13,10 +13,11 @@ import torch
 from torch.utils.data import (DataLoader, SequentialSampler,
                               TensorDataset)
 
-try:
-    from torch.utils.tensorboard import SummaryWriter
-except:
-    from tensorboardX import SummaryWriter
+
+# try:
+#     from torch.utils.tensorboard import SummaryWriter
+# except:
+#     from tensorboardX import SummaryWriter
 
 from tqdm import tqdm
 

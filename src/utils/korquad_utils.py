@@ -6,10 +6,51 @@ import logging
 import math
 
 from io import open
+import torch
 
 from .tokenization import BasicTokenizer, whitespace_tokenize
+from torch.utils.data.dataset import Dataset
 
 logger = logging.getLogger(__name__)
+
+class KorQuADDataset(Dataset) :
+    def __init__(self,examples,data_index_dict,tokenizer,args):
+
+        # training data
+        self.examples = examples
+        self.data_index_dict = data_index_dict
+        self.tokenizer=tokenizer
+        self.max_seq_length = args.max_seq_length
+        self.doc_stride = args.doc_stride
+        self.max_query_length=args.max_query_length
+
+    def __getitem__(self, index):
+
+        # data index를 토앻 example, document span index 추출
+        data_index = self.data_index_dict[index]
+        ex_doc_index=[index,data_index["example_index"],data_index["doc_index"]]
+
+        # Training Data로 부터 Input Featrue 생성
+        input_feature = convert_examples_to_features(examples=self.examples,
+                                     tokenizer=self.tokenizer,
+                                     max_seq_length=self.max_seq_length,
+                                     doc_stride=self.doc_stride,
+                                     max_query_length=self.max_query_length,
+                                     is_training=True,ex_doc_index=ex_doc_index)
+
+        all_input_ids = torch.tensor(input_feature.input_ids, dtype=torch.long)
+        all_input_mask = torch.tensor(input_feature.input_mask, dtype=torch.long)
+        all_segment_ids = torch.tensor(input_feature.segment_ids, dtype=torch.long)
+        all_start_positions = torch.tensor(input_feature.start_position, dtype=torch.long)
+        all_end_positions = torch.tensor(input_feature.end_position, dtype=torch.long)
+
+
+        return tuple([all_input_ids,all_input_mask,all_segment_ids,all_start_positions,all_end_positions])
+
+    def __len__(self):
+        return len(self.data_index_dict)
+
+
 
 
 class SquadExample(object):
@@ -160,14 +201,35 @@ def read_squad_examples(input_file, is_training, version_2_with_negative):
     return examples
 
 
+
+
 def convert_examples_to_features(examples, tokenizer, max_seq_length,
-                                 doc_stride, max_query_length, is_training):
-    """Loads a data file into a list of `InputBatch`s."""
+                                 doc_stride, max_query_length, is_training,only_get_dict=False,ex_doc_index=None):
+    """
+        Loads a data file into a list of `InputBatch`s.
+        Parameters:
+            only_get_dict - True -> InputFeature를 구하지 않고 training data id에 해당하는 dictionary (data_index_dict)만 생성
+                data_index_dict - {data_id : {example_index: xx, doc_index:xx}}
+
+            ex_doc_index - None이 아닌 경우 해당 example index, doc index의 Input Feature만을 Return
+                        ex) [1,2] -> example index = 1, doc index = 2
+    """
+    if only_get_dict==True:
+        data_id = 0
+        data_index_dict={}
 
     unique_id = 1000000000
 
     features = []
+
+    if ex_doc_index is not None :
+        examples=[examples[ex_doc_index[1]]]
+
     for (example_index, example) in enumerate(examples):
+
+        if ex_doc_index is not None:
+            example_index = ex_doc_index[1]
+
         query_tokens = tokenizer.tokenize(example.question_text)
 
         if len(query_tokens) > max_query_length:
@@ -218,6 +280,13 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length,
             start_offset += min(length, doc_stride)
 
         for (doc_span_index, doc_span) in enumerate(doc_spans):
+
+            if only_get_dict==True:
+                data_index_dict[data_id]={"example_index":example_index,"doc_index":doc_span_index}
+                data_id+=1
+                continue
+
+
             tokens = []
             token_to_orig_map = {}
             token_is_max_context = {}
@@ -279,7 +348,7 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length,
             if is_training and example.is_impossible:
                 start_position = 0
                 end_position = 0
-            if example_index < 20:
+            if example_index < 20 and ex_doc_index is None:
                 logger.info("*** Example ***")
                 logger.info("unique_id: %s" % (unique_id))
                 logger.info("example_index: %s" % (example_index))
@@ -303,24 +372,31 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length,
                     logger.info("end_position: %d" % (end_position))
                     logger.info(
                         "answer: %s" % (answer_text))
+            input_features = InputFeatures(
+                unique_id=unique_id,
+                example_index=example_index,
+                doc_span_index=doc_span_index,
+                tokens=tokens,
+                token_to_orig_map=token_to_orig_map,
+                token_is_max_context=token_is_max_context,
+                input_ids=input_ids,
+                input_mask=input_mask,
+                segment_ids=segment_ids,
+                start_position=start_position,
+                end_position=end_position,
+                is_impossible=example.is_impossible)
+            if ex_doc_index is not None and doc_span_index == ex_doc_index[2]:
+                input_features.unique_id+=ex_doc_index[0]
+                return input_features
+            else:
+                features.append(input_features)
+                unique_id += 1
 
-            features.append(
-                InputFeatures(
-                    unique_id=unique_id,
-                    example_index=example_index,
-                    doc_span_index=doc_span_index,
-                    tokens=tokens,
-                    token_to_orig_map=token_to_orig_map,
-                    token_is_max_context=token_is_max_context,
-                    input_ids=input_ids,
-                    input_mask=input_mask,
-                    segment_ids=segment_ids,
-                    start_position=start_position,
-                    end_position=end_position,
-                    is_impossible=example.is_impossible))
-            unique_id += 1
 
-    return features
+    if only_get_dict==True:
+        return data_index_dict
+    else:
+        return features
 
 def _improve_answer_span(doc_tokens, input_start, input_end, tokenizer,
                          orig_answer_text):
